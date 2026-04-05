@@ -4,6 +4,10 @@ Auto-generated [WebGPU](https://www.w3.org/TR/webgpu/) bindings for [Nelua](http
 
 Bindings are generated directly from the official C headers using [nelua-decl](https://github.com/edubart/nelua-decl). When upstream releases a new version, run `make update` and you're done.
 
+<div>
+  <img width=320 src='https://raw.githubusercontent.com/root7211/nelua-wgpu/main/examples/screenshots/triangle.png' />
+</div>
+
 ## Quick start
 
 ### Prerequisites
