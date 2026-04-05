@@ -24,7 +24,7 @@ Replace `13` with your GCC major version (`gcc --version`).
 ### Setup
 
 ```bash
-git clone https://github.com/youruser/nelua-wgpu.git
+git clone https://github.com/root7211/nelua-wgpu.git
 cd nelua-wgpu
 
 # Build the GCC Lua plugin used by nelua-decl
