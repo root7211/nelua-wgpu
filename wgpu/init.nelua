@@ -1,0 +1,77 @@
+--[[
+  wgpu/init.nelua - Stable utility helpers for WebGPU
+
+  Only contains thin helpers that depend on stable, rarely-changing types
+  (WGPUStringView, WGPUColor, WGPUExtent3D). These are safe from upstream
+  API changes and provide convenience without coupling to descriptor layouts.
+
+  For GPU context, buffers, textures, pipelines, and render passes,
+  use the raw bindings directly (require 'wgpu-c.webgpu').
+
+  Usage:
+    require 'wgpu'
+]]
+
+require 'wgpu-c.webgpu'
+require 'wgpu-c.webgpu_macros'
+
+-- ============================================================================
+-- WGPUStringView helpers
+-- ============================================================================
+
+-- Create a WGPUStringView from a Nelua string
+global function wgpu_string(s: string): WGPUStringView
+  return { data = (@cstring)(s.data), length = s.size }
+end
+
+-- Create a WGPUStringView from a cstring (null-terminated, uses WGPU_STRLEN)
+global function wgpu_cstring(s: cstring): WGPUStringView
+  return { data = s, length = (@csize)(-1) }
+end
+
+-- Create an empty/null WGPUStringView
+global function wgpu_null_string(): WGPUStringView
+  return { data = nilptr, length = 0 }
+end
+
+-- ============================================================================
+-- WGPUColor helpers
+-- ============================================================================
+
+global function wgpu_color(r: float64, g: float64, b: float64, a: float64): WGPUColor
+  return { r = r, g = g, b = b, a = a }
+end
+
+-- Convert 0-255 RGBA to WGPUColor (0.0-1.0)
+global function wgpu_color_rgba8(r: uint8, g: uint8, b: uint8, a: uint8): WGPUColor
+  return { r = r / 255.0, g = g / 255.0, b = b / 255.0, a = a / 255.0 }
+end
+
+-- Convert 0xRRGGBBAA hex to WGPUColor
+global function wgpu_color_hex(hex: uint32): WGPUColor
+  return {
+    r = ((hex >> 24) & 0xFF) / 255.0,
+    g = ((hex >> 16) & 0xFF) / 255.0,
+    b = ((hex >> 8) & 0xFF) / 255.0,
+    a = (hex & 0xFF) / 255.0,
+  }
+end
+
+global WGPU_COLOR_BLACK: WGPUColor = { r = 0, g = 0, b = 0, a = 1 }
+global WGPU_COLOR_WHITE: WGPUColor = { r = 1, g = 1, b = 1, a = 1 }
+global WGPU_COLOR_RED: WGPUColor = { r = 1, g = 0, b = 0, a = 1 }
+global WGPU_COLOR_GREEN: WGPUColor = { r = 0, g = 1, b = 0, a = 1 }
+global WGPU_COLOR_BLUE: WGPUColor = { r = 0, g = 0, b = 1, a = 1 }
+global WGPU_COLOR_TRANSPARENT: WGPUColor = { r = 0, g = 0, b = 0, a = 0 }
+
+-- ============================================================================
+-- WGPUExtent3D helpers
+-- ============================================================================
+
+global function wgpu_extent_2d(width: uint32, height: uint32): WGPUExtent3D
+  return { width = width, height = height, depthOrArrayLayers = 1 }
+end
+
+global function wgpu_extent_3d(width: uint32, height: uint32, depth: uint32): WGPUExtent3D
+  return { width = width, height = height, depthOrArrayLayers = depth }
+end

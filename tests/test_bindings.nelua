@@ -1,0 +1,515 @@
+--[[
+  test_bindings.nelua - Comprehensive binding validation test
+
+  Tests the full wgpu pipeline: instance -> adapter -> device -> GPU compute
+  Verifies that auto-generated bindings are correct and functional.
+
+  Run:
+    LD_LIBRARY_PATH=./deps/wgpu-native nelua tests/test_bindings.nelua --add-path . \
+      --cflags="-I./deps/wgpu-native/include" \
+      --ldflags="-L./deps/wgpu-native -lwgpu_native -ldl -lpthread -lm"
+]]
+
+require 'os'
+require 'wgpu-c.webgpu'
+
+-- ============================================================================
+-- Globals for async callbacks (Nelua has no closures)
+-- ============================================================================
+
+global g_adapter: WGPUAdapter = nilptr
+global g_adapter_status: WGPURequestAdapterStatus
+global g_device: WGPUDevice = nilptr
+global g_device_status: WGPURequestDeviceStatus
+global g_map_status: WGPUMapAsyncStatus
+
+-- ============================================================================
+-- Test utilities
+-- ============================================================================
+
+global test_passed: integer = 0
+global test_failed: integer = 0
+global test_total: integer = 0
+
+local function test_ok(name: string)
+  test_passed = test_passed + 1
+  test_total = test_total + 1
+  print('  [PASS]', name)
+end
+
+local function test_fail(name: string, reason: string)
+  test_failed = test_failed + 1
+  test_total = test_total + 1
+  print('  [FAIL]', name, '-', reason)
+end
+
+local function test_check(name: string, ok: boolean, reason: string)
+  if ok then test_ok(name) else test_fail(name, reason) end
+end
+
+-- ============================================================================
+-- Callbacks
+-- ============================================================================
+
+local function on_adapter(status: WGPURequestAdapterStatus, adapter: WGPUAdapter,
+                          message: WGPUStringView, userdata1: pointer, userdata2: pointer): void
+  g_adapter = adapter
+  g_adapter_status = status
+end
+
+local function on_device(status: WGPURequestDeviceStatus, device: WGPUDevice,
+                         message: WGPUStringView, userdata1: pointer, userdata2: pointer): void
+  g_device = device
+  g_device_status = status
+end
+
+local function on_buffer_mapped(status: WGPUMapAsyncStatus, message: WGPUStringView,
+                                userdata1: pointer, userdata2: pointer): void
+  g_map_status = status
+end
+
+-- ============================================================================
+-- Helper: create WGPUStringView from string literal
+-- ============================================================================
+
+local function sv(s: string): WGPUStringView
+  return { data = (@cstring)(s.data), length = s.size }
+end
+
+-- ============================================================================
+-- Test 1: Instance creation & wgpu-native version
+-- ============================================================================
+
+print('=== nelua-wgpu Comprehensive Binding Test ===')
+print('')
+print('[1] Instance & Version')
+
+local desc: WGPUInstanceDescriptor = {}
+local instance = wgpuCreateInstance(&desc)
+test_check('wgpuCreateInstance', instance ~= nilptr, 'returned nil')
+
+if instance == nilptr then
+  print('FATAL: Cannot create instance. Aborting.')
+  os.exit(1)
+end
+
+local version: uint32 = wgpuGetVersion()
+test_ok('wgpuGetVersion called')
+print('  Version raw:', version)
+
+-- ============================================================================
+-- Test 2: Request adapter
+-- ============================================================================
+
+print('')
+print('[2] Adapter Request')
+
+local opts: WGPURequestAdapterOptions = {
+  powerPreference = WGPUPowerPreference_HighPerformance,
+}
+local adapter_cb: WGPURequestAdapterCallbackInfo = {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_adapter,
+}
+
+wgpuInstanceRequestAdapter(instance, &opts, adapter_cb)
+wgpuInstanceProcessEvents(instance)
+
+test_check('adapter request status', g_adapter_status == WGPURequestAdapterStatus_Success,
+           'status not Success')
+
+if g_adapter == nilptr then
+  print('No GPU adapter available (headless/CI environment).')
+  print('Binding compilation verified. Skipping GPU tests.')
+  wgpuInstanceRelease(instance)
+  print('')
+  print('=== Results:', test_passed, 'passed,', test_failed, 'failed, of', test_total, '===')
+  os.exit(0)
+end
+
+-- ============================================================================
+-- Test 3: Adapter info
+-- ============================================================================
+
+print('')
+print('[3] Adapter Info')
+
+local info: WGPUAdapterInfo = {}
+wgpuAdapterGetInfo(g_adapter, &info)
+test_ok('wgpuAdapterGetInfo')
+
+-- Print adapter info (backend type as integer)
+print('  Backend type:', (@integer)(info.backendType))
+print('  Adapter type:', (@integer)(info.adapterType))
+
+wgpuAdapterInfoFreeMembers(info)
+
+-- ============================================================================
+-- Test 4: Request device
+-- ============================================================================
+
+print('')
+print('[4] Device Request')
+
+local device_desc: WGPUDeviceDescriptor = {
+  label = sv("test-device"),
+}
+local device_cb: WGPURequestDeviceCallbackInfo = {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_device,
+}
+
+wgpuAdapterRequestDevice(g_adapter, &device_desc, device_cb)
+wgpuInstanceProcessEvents(instance)
+
+test_check('device request status', g_device_status == WGPURequestDeviceStatus_Success,
+           'status not Success')
+
+if g_device == nilptr then
+  print('FATAL: Cannot get device. Aborting GPU tests.')
+  wgpuAdapterRelease(g_adapter)
+  wgpuInstanceRelease(instance)
+  os.exit(1)
+end
+
+local queue = wgpuDeviceGetQueue(g_device)
+test_check('wgpuDeviceGetQueue', queue ~= nilptr, 'queue is nil')
+
+-- ============================================================================
+-- Test 5: Buffer creation & mapped write
+-- ============================================================================
+
+print('')
+print('[5] Buffer Creation & Mapped Write')
+
+local BUFFER_SIZE: csize = 256
+
+-- Create a storage buffer with mappedAtCreation for writing initial data
+local buf_desc: WGPUBufferDescriptor = {
+  label = sv("test-buffer"),
+  usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst,
+  size = BUFFER_SIZE,
+  mappedAtCreation = 1,
+}
+local buffer = wgpuDeviceCreateBuffer(g_device, &buf_desc)
+test_check('wgpuDeviceCreateBuffer', buffer ~= nilptr, 'buffer is nil')
+
+-- Write data via mapped range
+local mapped = wgpuBufferGetMappedRange(buffer, 0, BUFFER_SIZE)
+test_check('wgpuBufferGetMappedRange', mapped ~= nilptr, 'mapped is nil')
+
+if mapped ~= nilptr then
+  local data = (@*[64]uint32)(mapped)
+  for i = 0, < 64 do
+    data[i] = (@uint32)(i * 10)
+  end
+  test_ok('write data to mapped buffer')
+end
+
+wgpuBufferUnmap(buffer)
+test_ok('wgpuBufferUnmap')
+
+-- ============================================================================
+-- Test 6: Read back buffer via MapAsync (separate MAP_READ buffer)
+-- ============================================================================
+
+print('')
+print('[6] Buffer MapAsync Read-back')
+
+-- MAP_READ can only combine with COPY_DST, so use a separate readback buffer
+local rb_desc: WGPUBufferDescriptor = {
+  label = sv("readback-t6"),
+  usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst,
+  size = BUFFER_SIZE,
+}
+local rb_buf = wgpuDeviceCreateBuffer(g_device, &rb_desc)
+test_check('create readback buffer', rb_buf ~= nilptr, 'nil')
+
+-- Copy storage -> readback
+local cp_enc = wgpuDeviceCreateCommandEncoder(g_device, &(@WGPUCommandEncoderDescriptor){})
+wgpuCommandEncoderCopyBufferToBuffer(cp_enc, buffer, 0, rb_buf, 0, BUFFER_SIZE)
+local cp_cmd = wgpuCommandEncoderFinish(cp_enc, &(@WGPUCommandBufferDescriptor){})
+wgpuQueueSubmit(queue, 1, &cp_cmd)
+
+local map_cb: WGPUBufferMapCallbackInfo = {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_buffer_mapped,
+}
+
+wgpuBufferMapAsync(rb_buf, WGPUMapMode_Read, 0, BUFFER_SIZE, map_cb)
+wgpuDevicePoll(g_device, 1, nilptr)
+
+test_check('buffer map status', g_map_status == WGPUMapAsyncStatus_Success,
+           'map failed')
+
+if g_map_status == WGPUMapAsyncStatus_Success then
+  local read_ptr = wgpuBufferGetConstMappedRange(rb_buf, 0, BUFFER_SIZE)
+  test_check('wgpuBufferGetConstMappedRange', read_ptr ~= nilptr, 'nil')
+
+  if read_ptr ~= nilptr then
+    local data = (@*[64]uint32)(read_ptr)
+    local verify_ok = true
+    for i = 0, < 64 do
+      if data[i] ~= (@uint32)(i * 10) then
+        verify_ok = false
+        print('  Mismatch at index', i)
+        break
+      end
+    end
+    test_check('buffer data integrity', verify_ok, 'data mismatch')
+  end
+  wgpuBufferUnmap(rb_buf)
+end
+
+-- ============================================================================
+-- Test 7: Shader module creation (WGSL)
+-- ============================================================================
+
+print('')
+print('[7] Shader Module (WGSL)')
+
+local wgsl_code: string = [[
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  if (idx < arrayLength(&data)) {
+    data[idx] = data[idx] * 2u;
+  }
+}
+]]
+
+local wgsl_src: WGPUShaderSourceWGSL = {
+  chain = { next = nilptr, sType = WGPUSType_ShaderSourceWGSL },
+  code = sv(wgsl_code),
+}
+local shader_desc: WGPUShaderModuleDescriptor = {
+  nextInChain = (@*WGPUChainedStruct)(&wgsl_src.chain),
+  label = sv("compute-shader"),
+}
+local shader = wgpuDeviceCreateShaderModule(g_device, &shader_desc)
+test_check('wgpuDeviceCreateShaderModule', shader ~= nilptr, 'shader is nil')
+
+-- ============================================================================
+-- Test 8: Compute pipeline
+-- ============================================================================
+
+print('')
+print('[8] Compute Pipeline')
+
+local pipeline_desc: WGPUComputePipelineDescriptor = {
+  label = sv("compute-pipeline"),
+  layout = nilptr, -- auto layout
+  compute = {
+    module = shader,
+    entryPoint = sv("main"),
+  },
+}
+local pipeline = wgpuDeviceCreateComputePipeline(g_device, &pipeline_desc)
+test_check('wgpuDeviceCreateComputePipeline', pipeline ~= nilptr, 'pipeline is nil')
+
+-- ============================================================================
+-- Test 9: Full GPU compute dispatch with verification
+-- ============================================================================
+
+print('')
+print('[9] GPU Compute Dispatch (double values)')
+
+-- Create input buffer with known data
+local COMPUTE_SIZE: csize = 64 * 4  -- 64 uint32s = 256 bytes
+
+local input_desc: WGPUBufferDescriptor = {
+  label = sv("input-buffer"),
+  usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc,
+  size = COMPUTE_SIZE,
+  mappedAtCreation = 1,
+}
+local input_buf = wgpuDeviceCreateBuffer(g_device, &input_desc)
+test_check('create input buffer', input_buf ~= nilptr, 'nil')
+
+do
+  local p = wgpuBufferGetMappedRange(input_buf, 0, COMPUTE_SIZE)
+  local d = (@*[64]uint32)(p)
+  for i = 0, < 64 do
+    d[i] = (@uint32)(i + 1)  -- 1, 2, 3, ... 64
+  end
+  wgpuBufferUnmap(input_buf)
+end
+
+-- Create output/readback buffer
+local readback_desc: WGPUBufferDescriptor = {
+  label = sv("readback-buffer"),
+  usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead,
+  size = COMPUTE_SIZE,
+}
+local readback_buf = wgpuDeviceCreateBuffer(g_device, &readback_desc)
+test_check('create readback buffer', readback_buf ~= nilptr, 'nil')
+
+-- Create bind group from pipeline auto layout
+local bgl = wgpuComputePipelineGetBindGroupLayout(pipeline, 0)
+test_check('getBindGroupLayout', bgl ~= nilptr, 'nil')
+
+local bg_entry: WGPUBindGroupEntry = {
+  binding = 0,
+  buffer = input_buf,
+  offset = 0,
+  size = COMPUTE_SIZE,
+}
+
+local bg_desc: WGPUBindGroupDescriptor = {
+  label = sv("compute-bg"),
+  layout = bgl,
+  entryCount = 1,
+  entries = &bg_entry,
+}
+local bind_group = wgpuDeviceCreateBindGroup(g_device, &bg_desc)
+test_check('wgpuDeviceCreateBindGroup', bind_group ~= nilptr, 'nil')
+
+-- Encode and dispatch
+local enc_desc: WGPUCommandEncoderDescriptor = { label = sv("encoder") }
+local encoder = wgpuDeviceCreateCommandEncoder(g_device, &enc_desc)
+test_check('createCommandEncoder', encoder ~= nilptr, 'nil')
+
+local pass_desc: WGPUComputePassDescriptor = { label = sv("compute-pass") }
+local pass = wgpuCommandEncoderBeginComputePass(encoder, &pass_desc)
+test_check('beginComputePass', pass ~= nilptr, 'nil')
+
+wgpuComputePassEncoderSetPipeline(pass, pipeline)
+wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, nilptr)
+wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1)
+wgpuComputePassEncoderEnd(pass)
+
+-- Copy result to readback buffer
+wgpuCommandEncoderCopyBufferToBuffer(encoder, input_buf, 0, readback_buf, 0, COMPUTE_SIZE)
+
+local cmd_desc: WGPUCommandBufferDescriptor = { label = sv("commands") }
+local cmd_buf = wgpuCommandEncoderFinish(encoder, &cmd_desc)
+test_check('commandEncoderFinish', cmd_buf ~= nilptr, 'nil')
+
+wgpuQueueSubmit(queue, 1, &cmd_buf)
+test_ok('queueSubmit')
+
+-- Map readback buffer and verify results
+g_map_status = WGPUMapAsyncStatus_Unknown
+local readback_map_cb: WGPUBufferMapCallbackInfo = {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_buffer_mapped,
+}
+wgpuBufferMapAsync(readback_buf, WGPUMapMode_Read, 0, COMPUTE_SIZE, readback_map_cb)
+wgpuDevicePoll(g_device, 1, nilptr)
+
+test_check('readback map', g_map_status == WGPUMapAsyncStatus_Success, 'map failed')
+
+if g_map_status == WGPUMapAsyncStatus_Success then
+  local rp = wgpuBufferGetConstMappedRange(readback_buf, 0, COMPUTE_SIZE)
+  if rp ~= nilptr then
+    local d = (@*[64]uint32)(rp)
+    local all_ok = true
+    for i = 0, < 64 do
+      local expected: uint32 = (@uint32)((i + 1) * 2)  -- shader doubles each value
+      if d[i] ~= expected then
+        all_ok = false
+        print('  First mismatch at index', i, '- expected', expected, 'got', d[i])
+        break
+      end
+    end
+    if all_ok then
+      test_ok('GPU compute results verified (all 64 values doubled)')
+    else
+      test_fail('GPU compute results', 'data mismatch')
+    end
+  end
+  wgpuBufferUnmap(readback_buf)
+end
+
+-- ============================================================================
+-- Test 10: Texture creation
+-- ============================================================================
+
+print('')
+print('[10] Texture Creation')
+
+local tex_desc: WGPUTextureDescriptor = {
+  label = sv("test-texture"),
+  usage = WGPUTextureUsage_CopyDst | WGPUTextureUsage_TextureBinding,
+  dimension = WGPUTextureDimension_2D,
+  size = { width = 256, height = 256, depthOrArrayLayers = 1 },
+  format = WGPUTextureFormat_RGBA8Unorm,
+  mipLevelCount = 1,
+  sampleCount = 1,
+  viewFormatCount = 0,
+  viewFormats = nilptr,
+}
+local texture = wgpuDeviceCreateTexture(g_device, &tex_desc)
+test_check('wgpuDeviceCreateTexture', texture ~= nilptr, 'nil')
+
+if texture ~= nilptr then
+  local w = wgpuTextureGetWidth(texture)
+  local h = wgpuTextureGetHeight(texture)
+  test_check('texture dimensions', w == 256 and h == 256, 'wrong size')
+  wgpuTextureRelease(texture)
+end
+
+-- ============================================================================
+-- Test 11: Sampler creation
+-- ============================================================================
+
+print('')
+print('[11] Sampler Creation')
+
+local sampler_desc: WGPUSamplerDescriptor = {
+  label = sv("test-sampler"),
+  addressModeU = WGPUAddressMode_ClampToEdge,
+  addressModeV = WGPUAddressMode_ClampToEdge,
+  addressModeW = WGPUAddressMode_ClampToEdge,
+  magFilter = WGPUFilterMode_Linear,
+  minFilter = WGPUFilterMode_Linear,
+  mipmapFilter = WGPUMipmapFilterMode_Linear,
+  lodMinClamp = 0.0,
+  lodMaxClamp = 32.0,
+  maxAnisotropy = 1,
+}
+local sampler = wgpuDeviceCreateSampler(g_device, &sampler_desc)
+test_check('wgpuDeviceCreateSampler', sampler ~= nilptr, 'nil')
+if sampler ~= nilptr then wgpuSamplerRelease(sampler) end
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+
+print('')
+print('[Cleanup]')
+
+wgpuBufferRelease(buffer)
+wgpuBufferRelease(rb_buf)
+wgpuCommandEncoderRelease(cp_enc)
+wgpuCommandBufferRelease(cp_cmd)
+wgpuBufferRelease(input_buf)
+wgpuBufferRelease(readback_buf)
+wgpuBindGroupRelease(bind_group)
+wgpuBindGroupLayoutRelease(bgl)
+wgpuComputePassEncoderRelease(pass)
+wgpuCommandEncoderRelease(encoder)
+wgpuCommandBufferRelease(cmd_buf)
+wgpuComputePipelineRelease(pipeline)
+wgpuShaderModuleRelease(shader)
+wgpuQueueRelease(queue)
+wgpuDeviceDestroy(g_device)
+wgpuDeviceRelease(g_device)
+wgpuAdapterRelease(g_adapter)
+wgpuInstanceRelease(instance)
+test_ok('all resources released')
+
+-- ============================================================================
+-- Summary
+-- ============================================================================
+
+print('')
+print('============================================')
+print('  Results:', test_passed, 'passed,', test_failed, 'failed, of', test_total)
+print('============================================')
+
+if test_failed > 0 then
+  os.exit(1)
+end

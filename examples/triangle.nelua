@@ -1,0 +1,293 @@
+--[[
+  triangle.nelua - Render a colored triangle using WGPU + GLFW
+
+  Prerequisites:
+    sudo apt install libglfw3-dev
+
+  Run:
+    cd nelua-wgpu
+    LD_LIBRARY_PATH=./deps/wgpu-native nelua examples/triangle.nelua \
+      --add-path . --add-path examples \
+      --cflags="-I./deps/wgpu-native/include" \
+      --ldflags="-L./deps/wgpu-native -lwgpu_native -ldl -lpthread -lm"
+]]
+
+require 'os'
+require 'wgpu'
+require 'glfw'
+
+-- ============================================================================
+-- Shader (vertex-colored triangle)
+-- ============================================================================
+
+local SHADER_CODE: string = [[
+struct VertexOutput {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+  var positions = array<vec2<f32>, 3>(
+    vec2<f32>( 0.0,  0.5),
+    vec2<f32>(-0.5, -0.5),
+    vec2<f32>( 0.5, -0.5),
+  );
+  var colors = array<vec3<f32>, 3>(
+    vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, 1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0),
+  );
+  var out: VertexOutput;
+  out.pos = vec4<f32>(positions[idx], 0.0, 1.0);
+  out.color = colors[idx];
+  return out;
+}
+
+@fragment
+fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
+  return vec4<f32>(color, 1.0);
+}
+]]
+
+-- ============================================================================
+-- Globals for async callbacks
+-- ============================================================================
+
+global g_adapter: WGPUAdapter = nilptr
+global g_adapter_ok: boolean = false
+global g_device: WGPUDevice = nilptr
+global g_device_ok: boolean = false
+
+local function on_adapter(status: WGPURequestAdapterStatus, adapter: WGPUAdapter,
+                          message: WGPUStringView, u1: pointer, u2: pointer): void
+  g_adapter = adapter
+  g_adapter_ok = (status == WGPURequestAdapterStatus_Success)
+end
+
+local function on_device(status: WGPURequestDeviceStatus, device: WGPUDevice,
+                         message: WGPUStringView, u1: pointer, u2: pointer): void
+  g_device = device
+  g_device_ok = (status == WGPURequestDeviceStatus_Success)
+end
+
+-- ============================================================================
+-- Main
+-- ============================================================================
+
+print('=== WGPU Triangle Example ===')
+
+-- Init GLFW
+assert(glfwInit() ~= 0, "GLFW init failed")
+glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
+glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE)
+
+local WIDTH: cint = 800
+local HEIGHT: cint = 600
+local window = glfwCreateWindow(WIDTH, HEIGHT, "nelua-wgpu triangle", nilptr, nilptr)
+assert(window ~= nilptr, "Window creation failed")
+
+-- Create WGPU instance with wgpu-native backend hints
+local inst_desc: WGPUInstanceDescriptor = {}
+local instance = wgpuCreateInstance(&inst_desc)
+assert(instance ~= nilptr, "Instance creation failed")
+
+-- Create surface from X11 window
+local x11_source: WGPUSurfaceSourceXlibWindow = {
+  chain = { next = nilptr, sType = WGPUSType_SurfaceSourceXlibWindow },
+  display = glfwGetX11Display(),
+  window = (@uint64)(glfwGetX11Window(window)),
+}
+local surface_desc: WGPUSurfaceDescriptor = {
+  nextInChain = (@*WGPUChainedStruct)(&x11_source.chain),
+  label = wgpu_string("main-surface"),
+}
+local surface = wgpuInstanceCreateSurface(instance, &surface_desc)
+assert(surface ~= nilptr, "Surface creation failed")
+print('Surface created')
+
+-- Request adapter (compatible with surface)
+local adapter_opts: WGPURequestAdapterOptions = {
+  compatibleSurface = surface,
+  powerPreference = WGPUPowerPreference_HighPerformance,
+}
+wgpuInstanceRequestAdapter(instance, &adapter_opts, {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_adapter,
+})
+wgpuInstanceProcessEvents(instance)
+assert(g_adapter_ok, "Adapter request failed")
+print('Adapter acquired')
+
+-- Request device
+local dev_desc: WGPUDeviceDescriptor = {
+  label = wgpu_string("triangle-device"),
+}
+wgpuAdapterRequestDevice(g_adapter, &dev_desc, {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_device,
+})
+wgpuInstanceProcessEvents(instance)
+assert(g_device_ok, "Device request failed")
+print('Device acquired')
+
+local queue = wgpuDeviceGetQueue(g_device)
+
+-- Get surface capabilities and configure
+local caps: WGPUSurfaceCapabilities = {}
+wgpuSurfaceGetCapabilities(surface, g_adapter, &caps)
+
+local formats = (@*[0]WGPUTextureFormat)(caps.formats)
+local surface_format = formats[0]
+print('Surface format:', (@integer)(surface_format))
+
+local alpha_modes = (@*[0]WGPUCompositeAlphaMode)(caps.alphaModes)
+
+local surface_config: WGPUSurfaceConfiguration = {
+  device = g_device,
+  format = surface_format,
+  usage = WGPUTextureUsage_RenderAttachment,
+  alphaMode = alpha_modes[0],
+  width = (@uint32)(WIDTH),
+  height = (@uint32)(HEIGHT),
+  presentMode = WGPUPresentMode_Fifo,
+}
+wgpuSurfaceConfigure(surface, &surface_config)
+print('Surface configured')
+
+wgpuSurfaceCapabilitiesFreeMembers(caps)
+
+-- Create shader module
+local wgsl_src: WGPUShaderSourceWGSL = {
+  chain = { next = nilptr, sType = WGPUSType_ShaderSourceWGSL },
+  code = wgpu_string(SHADER_CODE),
+}
+local shader_desc: WGPUShaderModuleDescriptor = {
+  nextInChain = (@*WGPUChainedStruct)(&wgsl_src.chain),
+  label = wgpu_string("triangle-shader"),
+}
+local shader = wgpuDeviceCreateShaderModule(g_device, &shader_desc)
+assert(shader ~= nilptr, "Shader creation failed")
+
+-- Create render pipeline
+local blend_state: WGPUBlendState = {
+  color = {
+    srcFactor = WGPUBlendFactor_One,
+    dstFactor = WGPUBlendFactor_Zero,
+    operation = WGPUBlendOperation_Add,
+  },
+  alpha = {
+    srcFactor = WGPUBlendFactor_One,
+    dstFactor = WGPUBlendFactor_Zero,
+    operation = WGPUBlendOperation_Add,
+  },
+}
+
+local color_target: WGPUColorTargetState = {
+  format = surface_format,
+  blend = &blend_state,
+  writeMask = WGPUColorWriteMask_All,
+}
+
+local fragment_state: WGPUFragmentState = {
+  module = shader,
+  entryPoint = wgpu_string("fs_main"),
+  targetCount = 1,
+  targets = &color_target,
+}
+
+local pipeline_desc: WGPURenderPipelineDescriptor = {
+  label = wgpu_string("triangle-pipeline"),
+  vertex = {
+    module = shader,
+    entryPoint = wgpu_string("vs_main"),
+    bufferCount = 0,
+    buffers = nilptr,
+  },
+  primitive = {
+    topology = WGPUPrimitiveTopology_TriangleList,
+    frontFace = WGPUFrontFace_CCW,
+    cullMode = WGPUCullMode_None,
+  },
+  multisample = {
+    count = 1,
+    mask = 0xFFFFFFFF,
+  },
+  fragment = &fragment_state,
+  depthStencil = nilptr,
+}
+
+local pipeline = wgpuDeviceCreateRenderPipeline(g_device, &pipeline_desc)
+assert(pipeline ~= nilptr, "Pipeline creation failed")
+print('Render pipeline created')
+print('Entering render loop... Close window to exit.')
+
+-- ============================================================================
+-- Render loop
+-- ============================================================================
+
+while glfwWindowShouldClose(window) == 0 do
+  glfwPollEvents()
+
+  -- Get surface texture
+  local surface_texture: WGPUSurfaceTexture = {}
+  wgpuSurfaceGetCurrentTexture(surface, &surface_texture)
+
+  if surface_texture.status ~= WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal and
+     surface_texture.status ~= WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal then
+    print('Surface texture error, skipping frame')
+    continue
+  end
+
+  -- Create view
+  local view = wgpuTextureCreateView(surface_texture.texture, nilptr)
+
+  -- Encode render pass
+  local encoder = wgpuDeviceCreateCommandEncoder(g_device, &(@WGPUCommandEncoderDescriptor){})
+
+  local color_att: WGPURenderPassColorAttachment = {
+    view = view,
+    depthSlice = 0xFFFFFFFF,
+    resolveTarget = nilptr,
+    loadOp = WGPULoadOp_Clear,
+    storeOp = WGPUStoreOp_Store,
+    clearValue = wgpu_color(0.05, 0.05, 0.05, 1.0),
+  }
+  local rp_desc: WGPURenderPassDescriptor = {
+    colorAttachmentCount = 1,
+    colorAttachments = &color_att,
+  }
+
+  local rpass = wgpuCommandEncoderBeginRenderPass(encoder, &rp_desc)
+  wgpuRenderPassEncoderSetPipeline(rpass, pipeline)
+  wgpuRenderPassEncoderDraw(rpass, 3, 1, 0, 0)
+  wgpuRenderPassEncoderEnd(rpass)
+  wgpuRenderPassEncoderRelease(rpass)
+
+  local cmd = wgpuCommandEncoderFinish(encoder, &(@WGPUCommandBufferDescriptor){})
+  wgpuQueueSubmit(queue, 1, &cmd)
+  wgpuSurfacePresent(surface)
+
+  wgpuCommandBufferRelease(cmd)
+  wgpuCommandEncoderRelease(encoder)
+  wgpuTextureViewRelease(view)
+  wgpuTextureRelease(surface_texture.texture)
+end
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+
+print('Cleaning up...')
+wgpuRenderPipelineRelease(pipeline)
+wgpuShaderModuleRelease(shader)
+wgpuSurfaceUnconfigure(surface)
+wgpuSurfaceRelease(surface)
+wgpuQueueRelease(queue)
+wgpuDeviceDestroy(g_device)
+wgpuDeviceRelease(g_device)
+wgpuAdapterRelease(g_adapter)
+wgpuInstanceRelease(instance)
+glfwDestroyWindow(window)
+glfwTerminate()
+print('Done!')
