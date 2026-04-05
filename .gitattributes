@@ -1,0 +1,3 @@
+*.nelua linguist-language=Lua
+*.h linguist-vendored
+wgpu-c/codegen/*.h linguist-vendored
