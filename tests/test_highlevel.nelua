@@ -1,0 +1,253 @@
+--[[
+  test_highlevel.nelua - Test stable utility helpers + raw binding workflow
+
+  Demonstrates the recommended usage pattern:
+  - require 'wgpu' for stable helpers (string, color, extent)
+  - Use raw binding functions directly for GPU operations
+
+  Run:
+    LD_LIBRARY_PATH=./deps/wgpu-native nelua tests/test_highlevel.nelua \
+      --add-path . \
+      --cflags="-I./deps/wgpu-native/include" \
+      --ldflags="-L./deps/wgpu-native -lwgpu_native -ldl -lpthread -lm"
+]]
+
+require 'os'
+require 'wgpu'
+
+print('=== Utility Helpers + Raw Binding Test ===')
+print('')
+
+-- ============================================================================
+-- 1. Test string helpers
+-- ============================================================================
+
+print('[1] String Helpers')
+
+local sv = wgpu_string("hello wgpu")
+assert(sv.length == 10, "wgpu_string length wrong")
+print('  OK: wgpu_string')
+
+local csv = wgpu_cstring("hello")
+assert(csv.length == (@csize)(-1), "wgpu_cstring sentinel wrong")
+print('  OK: wgpu_cstring')
+
+local nsv = wgpu_null_string()
+assert(nsv.data == nilptr and nsv.length == 0, "wgpu_null_string wrong")
+print('  OK: wgpu_null_string')
+
+-- ============================================================================
+-- 2. Test color helpers
+-- ============================================================================
+
+print('[2] Color Helpers')
+
+local c = wgpu_color(0.5, 0.6, 0.7, 1.0)
+assert(c.r == 0.5 and c.g == 0.6 and c.b == 0.7 and c.a == 1.0, "wgpu_color wrong")
+print('  OK: wgpu_color')
+
+local c8 = wgpu_color_rgba8(255, 128, 0, 255)
+assert(c8.r == 1.0 and c8.a == 1.0, "wgpu_color_rgba8 wrong")
+print('  OK: wgpu_color_rgba8')
+
+local ch = wgpu_color_hex(0xFF8000FF)
+assert(ch.r == 1.0 and ch.a == 1.0, "wgpu_color_hex wrong")
+print('  OK: wgpu_color_hex')
+
+assert(WGPU_COLOR_BLACK.r == 0 and WGPU_COLOR_BLACK.a == 1, "black wrong")
+assert(WGPU_COLOR_WHITE.r == 1 and WGPU_COLOR_WHITE.a == 1, "white wrong")
+print('  OK: color constants')
+
+-- ============================================================================
+-- 3. Test extent helpers
+-- ============================================================================
+
+print('[3] Extent Helpers')
+
+local e2 = wgpu_extent_2d(800, 600)
+assert(e2.width == 800 and e2.height == 600 and e2.depthOrArrayLayers == 1, "extent_2d wrong")
+print('  OK: wgpu_extent_2d')
+
+local e3 = wgpu_extent_3d(64, 64, 8)
+assert(e3.depthOrArrayLayers == 8, "extent_3d wrong")
+print('  OK: wgpu_extent_3d')
+
+-- ============================================================================
+-- 4. GPU workflow using raw bindings + helpers
+-- ============================================================================
+
+print('[4] GPU Compute (raw binding + helpers)')
+
+-- Callbacks (no closures)
+global g_adapter: WGPUAdapter = nilptr
+global g_adapter_ok: boolean = false
+global g_device: WGPUDevice = nilptr
+global g_device_ok: boolean = false
+global g_map_ok: boolean = false
+
+local function on_adapter(status: WGPURequestAdapterStatus, adapter: WGPUAdapter,
+                          message: WGPUStringView, u1: pointer, u2: pointer): void
+  g_adapter = adapter
+  g_adapter_ok = (status == WGPURequestAdapterStatus_Success)
+end
+
+local function on_device(status: WGPURequestDeviceStatus, device: WGPUDevice,
+                         message: WGPUStringView, u1: pointer, u2: pointer): void
+  g_device = device
+  g_device_ok = (status == WGPURequestDeviceStatus_Success)
+end
+
+local function on_mapped(status: WGPUMapAsyncStatus, message: WGPUStringView,
+                         u1: pointer, u2: pointer): void
+  g_map_ok = (status == WGPUMapAsyncStatus_Success)
+end
+
+-- Create instance
+local inst_desc: WGPUInstanceDescriptor = {}
+local instance = wgpuCreateInstance(&inst_desc)
+if instance == nilptr then
+  print('  No GPU available. Helpers test passed, skipping GPU.')
+  os.exit(0)
+end
+
+-- Request adapter
+local adapter_opts: WGPURequestAdapterOptions = {
+  powerPreference = WGPUPowerPreference_HighPerformance,
+}
+wgpuInstanceRequestAdapter(instance, &adapter_opts, {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_adapter,
+})
+wgpuInstanceProcessEvents(instance)
+
+if not g_adapter_ok then
+  print('  No adapter. Helpers test passed, skipping GPU.')
+  wgpuInstanceRelease(instance)
+  os.exit(0)
+end
+
+-- Request device
+local dev_desc: WGPUDeviceDescriptor = {
+  label = wgpu_string("test-device"),  -- <-- helper used here
+}
+wgpuAdapterRequestDevice(g_adapter, &dev_desc, {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_device,
+})
+wgpuInstanceProcessEvents(instance)
+assert(g_device_ok, "device request failed")
+
+local queue = wgpuDeviceGetQueue(g_device)
+print('  OK: instance + adapter + device')
+
+-- Create shader with helpers for string conversion
+local wgsl_code: string = [[
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  if (idx < arrayLength(&data)) {
+    data[idx] = data[idx] + 100u;
+  }
+}
+]]
+
+local wgsl_src: WGPUShaderSourceWGSL = {
+  chain = { next = nilptr, sType = WGPUSType_ShaderSourceWGSL },
+  code = wgpu_string(wgsl_code),  -- <-- helper
+}
+local shader_desc: WGPUShaderModuleDescriptor = {
+  nextInChain = (@*WGPUChainedStruct)(&wgsl_src.chain),
+  label = wgpu_string("add-100"),  -- <-- helper
+}
+local shader = wgpuDeviceCreateShaderModule(g_device, &shader_desc)
+assert(shader ~= nilptr, "shader failed")
+
+-- Pipeline
+local pipe_desc: WGPUComputePipelineDescriptor = {
+  label = wgpu_string("add-100-pipeline"),  -- <-- helper
+  compute = { module = shader, entryPoint = wgpu_string("main") },
+}
+local pipeline = wgpuDeviceCreateComputePipeline(g_device, &pipe_desc)
+assert(pipeline ~= nilptr, "pipeline failed")
+
+-- Storage buffer
+local input: [8]uint32 = { 1, 2, 3, 4, 5, 6, 7, 8 }
+local buf_desc: WGPUBufferDescriptor = {
+  label = wgpu_string("data"),  -- <-- helper
+  usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc,
+  size = 32,
+  mappedAtCreation = 1,
+}
+local buf = wgpuDeviceCreateBuffer(g_device, &buf_desc)
+do
+  local p = (@*[8]uint32)(wgpuBufferGetMappedRange(buf, 0, 32))
+  for i = 0, < 8 do p[i] = input[i] end
+  wgpuBufferUnmap(buf)
+end
+
+-- Readback buffer
+local rb_desc: WGPUBufferDescriptor = {
+  usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead,
+  size = 32,
+}
+local readback = wgpuDeviceCreateBuffer(g_device, &rb_desc)
+
+-- Bind group
+local bgl = wgpuComputePipelineGetBindGroupLayout(pipeline, 0)
+local entry: WGPUBindGroupEntry = { binding = 0, buffer = buf, offset = 0, size = 32 }
+local bg_desc: WGPUBindGroupDescriptor = { layout = bgl, entryCount = 1, entries = &entry }
+local bg = wgpuDeviceCreateBindGroup(g_device, &bg_desc)
+
+-- Encode & dispatch
+local enc = wgpuDeviceCreateCommandEncoder(g_device, &(@WGPUCommandEncoderDescriptor){})
+local pass = wgpuCommandEncoderBeginComputePass(enc, &(@WGPUComputePassDescriptor){})
+wgpuComputePassEncoderSetPipeline(pass, pipeline)
+wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, nilptr)
+wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1)
+wgpuComputePassEncoderEnd(pass)
+wgpuCommandEncoderCopyBufferToBuffer(enc, buf, 0, readback, 0, 32)
+local cmd = wgpuCommandEncoderFinish(enc, &(@WGPUCommandBufferDescriptor){})
+wgpuQueueSubmit(queue, 1, &cmd)
+
+-- Read back
+wgpuBufferMapAsync(readback, WGPUMapMode_Read, 0, 32, {
+  mode = WGPUCallbackMode_AllowProcessEvents,
+  callback = on_mapped,
+})
+wgpuDevicePoll(g_device, 1, nilptr)
+assert(g_map_ok, "map failed")
+
+local result = (@*[8]uint32)(wgpuBufferGetConstMappedRange(readback, 0, 32))
+local ok = true
+for i = 0, < 8 do
+  if result[i] ~= input[i] + 100 then ok = false end
+end
+wgpuBufferUnmap(readback)
+
+if ok then
+  print('  OK: GPU compute verified [101,102,103,104,105,106,107,108]')
+else
+  print('  FAIL: data mismatch')
+  os.exit(1)
+end
+
+-- Cleanup
+wgpuBufferRelease(readback)
+wgpuBufferRelease(buf)
+wgpuBindGroupRelease(bg)
+wgpuBindGroupLayoutRelease(bgl)
+wgpuComputePipelineRelease(pipeline)
+wgpuShaderModuleRelease(shader)
+wgpuComputePassEncoderRelease(pass)
+wgpuCommandEncoderRelease(enc)
+wgpuCommandBufferRelease(cmd)
+wgpuQueueRelease(queue)
+wgpuDeviceDestroy(g_device)
+wgpuDeviceRelease(g_device)
+wgpuAdapterRelease(g_adapter)
+wgpuInstanceRelease(instance)
+
+print('')
+print('=== All tests passed! ===')

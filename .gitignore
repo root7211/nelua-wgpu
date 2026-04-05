@@ -1,0 +1,35 @@
+# Dependencies (cloned at setup time)
+deps/
+
+# Generated bindings (regenerate with: make generate)
+wgpu-c/webgpu.nelua
+wgpu-c/webgpu_macros.nelua
+
+# Downloaded headers (fetched by: make update)
+# Keep the codegen headers checked in so users without nelua-decl can still see what was used
+# wgpu-c/codegen/webgpu.h
+# wgpu-c/codegen/wgpu.h
+
+# Backup files
+*.bak
+
+# Version tracking (auto-generated)
+VERSION
+
+# Python
+__pycache__/
+*.pyc
+
+# Nelua cache
+.cache/
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

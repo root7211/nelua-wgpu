@@ -1,0 +1,43 @@
+--[[
+  glfw.nelua - Minimal GLFW3 bindings for wgpu examples
+
+  Only includes the functions needed for window creation and event loop.
+  For full GLFW bindings, generate via nelua-decl.
+]]
+
+##[[ cinclude '<GLFW/glfw3.h>' ]]
+
+-- On Linux, we need X11 or Wayland native access
+## if ccinfo.is_linux then
+  ##[[ cdefine 'GLFW_EXPOSE_NATIVE_X11' ]]
+  ##[[ cinclude '<GLFW/glfw3native.h>' ]]
+## end
+
+##[[ linklib 'glfw' ]]
+
+-- Opaque window type
+global GLFWwindow: type <cimport,nodecl,forwarddecl> = @record{}
+
+-- Constants
+global GLFW_TRUE: cint <cimport,nodecl,const>
+global GLFW_FALSE: cint <cimport,nodecl,const>
+global GLFW_CLIENT_API: cint <cimport,nodecl,const>
+global GLFW_NO_API: cint <cimport,nodecl,const>
+global GLFW_RESIZABLE: cint <cimport,nodecl,const>
+
+-- Core functions
+global function glfwInit(): cint <cimport,nodecl> end
+global function glfwTerminate(): void <cimport,nodecl> end
+global function glfwPollEvents(): void <cimport,nodecl> end
+global function glfwWindowHint(hint: cint, value: cint): void <cimport,nodecl> end
+global function glfwCreateWindow(width: cint, height: cint, title: cstring,
+                                  monitor: pointer, share: pointer): *GLFWwindow <cimport,nodecl> end
+global function glfwDestroyWindow(window: *GLFWwindow): void <cimport,nodecl> end
+global function glfwWindowShouldClose(window: *GLFWwindow): cint <cimport,nodecl> end
+global function glfwGetFramebufferSize(window: *GLFWwindow, width: *cint, height: *cint): void <cimport,nodecl> end
+
+-- X11 native access (Linux)
+## if ccinfo.is_linux then
+global function glfwGetX11Display(): pointer <cimport,nodecl> end
+global function glfwGetX11Window(window: *GLFWwindow): culong <cimport,nodecl> end
+## end
