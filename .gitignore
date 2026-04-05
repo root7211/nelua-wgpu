@@ -33,3 +33,8 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Others
+*.nelua linguist-language=Lua
+*.h linguist-vendored
+wgpu-c/codegen/*.h linguist-vendored
